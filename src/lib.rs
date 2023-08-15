@@ -42,6 +42,8 @@ pub enum Error {
     FfiTypeFrom { ffi_type: FfiType, context: String },
     #[error("Received unexpected nullptr")]
     NullPtr,
+    #[error("Spout function not bindable to Rust")]
+    Unbindable,
 }
 
 #[derive(Debug)]
@@ -55,12 +57,16 @@ type Result<T> = std::result::Result<T, Error>;
 // Typedefs using concrete types instead of ffi types for readability.
 
 /// A Windows DWORD which _should_ be a ulong.
-type DWORD = c_ulong;
+pub type DWORD = c_ulong;
+/// A void pointer.
+pub type HANDLE = ffi::HANDLE;
 /// An OpenGL uint which _should_ be a uint.
-type GLuint = c_uint;
+pub type GLuint = c_uint;
 // TODO lookup the actual enums and redefine them here?
 /// An OpenGL enum which _should_ be a uint.
-type GLenum = c_uint;
+pub type GLenum = c_uint;
+/// Enum representing log levels.
+pub type SpoutLibLogLevel = ffi::SpoutLibLogLevel;
 
 include_cpp! {
     #include "SpoutLibrary.h"
@@ -77,6 +83,29 @@ macro_rules! library {
         match $lib {
             Some(v) => as_pin(v),
             None => return Err(Error::NoHandle),
+        }
+    }};
+}
+
+macro_rules! str_to_cstring {
+    ($fn_name:expr, $str:expr) => {{
+        match CString::new($str.as_ref()) {
+            Ok(v) => v,
+            Err(e) => {
+                return Err(Error::FfiTypeInto {
+                    ffi_type: FfiType::CString,
+                    context: format!("{}: {e}", $fn_name),
+                })
+            }
+        }
+    }};
+}
+
+macro_rules! cstring_to_string {
+    ($fn_name:expr, $c_string:expr) => {{
+        match $c_string.to_str() {
+            Ok(v) => v.to_string(),
+            Err(e) => format!("{}: {e}", $fn_name),
         }
     }};
 }
@@ -303,8 +332,8 @@ impl RustySpout {
     /// # Safety
     /// Guaranteed to have a valid pointer to `SPOUTLIBRARY` as long as the backing struct exists.
     ///
-    /// No safety guarantees are made about the void pointer `c_void`.
-    pub fn get_handle(&mut self) -> Result<*mut c_void> {
+    /// No safety guarantees are made about the `HANDLE`.
+    pub fn get_handle(&mut self) -> Result<HANDLE> {
         let lib = unsafe { library!(self.library) };
 
         Ok(lib.GetHandle())
@@ -537,12 +566,11 @@ impl RustySpout {
 
     /// Get the received sender share handle.
     ///
-    /// # Important
-    /// No safety guarantees are made about the void pointer `c_void`.
-    ///
     /// # Safety
     /// Guaranteed to have a valid pointer to `SPOUTLIBRARY` as long as the backing struct exists.
-    pub fn get_sender_handle(&mut self) -> Result<*mut c_void> {
+    ///
+    /// No safety guarantees are made about the `HANDLE`.
+    pub fn get_sender_handle(&mut self) -> Result<HANDLE> {
         let lib = unsafe { library!(self.library) };
 
         Ok(lib.GetSenderHandle())
@@ -593,6 +621,743 @@ impl RustySpout {
         lib.SetFrameCount(enable);
 
         Ok(())
+    }
+
+    /// Disable frame counting specifically for this application;
+    ///
+    /// # Safety
+    /// Guaranteed to have a valid pointer to `SPOUTLIBRARY` as long as the backing struct exists.
+    pub fn disable_frame_count(&mut self) -> Result<()> {
+        let lib = unsafe { library!(self.library) };
+
+        lib.DisableFrameCount();
+
+        Ok(())
+    }
+
+    pub fn is_frame_count_enabled(&mut self) -> Result<bool> {
+        let lib = unsafe { library!(self.library) };
+
+        Ok(lib.IsFrameCountEnabled())
+    }
+
+    pub fn hold_fps(&mut self, fps: i32) -> Result<()> {
+        let lib = unsafe { library!(self.library) };
+
+        lib.HoldFps(fps.into());
+
+        Ok(())
+    }
+
+    pub fn get_refresh_rate(&mut self) -> Result<f64> {
+        let lib = unsafe { library!(self.library) };
+
+        Ok(lib.GetRefreshRate())
+    }
+
+    pub fn set_frame_sync<T: AsRef<str>>(&mut self, sender_name: T) -> Result<()> {
+        let lib = unsafe { library!(self.library) };
+
+        let name = match CString::new(sender_name.as_ref()) {
+            Ok(v) => v,
+            Err(e) => {
+                return Err(Error::FfiTypeInto {
+                    ffi_type: FfiType::CString,
+                    context: format!("set_frame_sync: {e}"),
+                })
+            }
+        };
+
+        unsafe {
+            lib.SetFrameSync(name.as_ptr());
+        }
+
+        Ok(())
+    }
+
+    pub fn wait_frame_sync<T: AsRef<str>>(
+        &mut self,
+        sender_name: T,
+        timeout: DWORD,
+    ) -> Result<bool> {
+        let lib = unsafe { library!(self.library) };
+
+        let name = match CString::new(sender_name.as_ref()) {
+            Ok(v) => v,
+            Err(e) => {
+                return Err(Error::FfiTypeInto {
+                    ffi_type: FfiType::CString,
+                    context: format!("wait_frame_sync: {e}"),
+                })
+            }
+        };
+
+        let success = unsafe { lib.WaitFrameSync(name.as_ptr(), timeout) };
+
+        Ok(success)
+    }
+
+    pub fn write_memory_buffer<T: AsRef<str>>(
+        &mut self,
+        sender_name: T,
+        data: T,
+        length: i32,
+    ) -> Result<bool> {
+        let lib = unsafe { library!(self.library) };
+
+        let name = str_to_cstring!("write_memory_buffer", sender_name);
+        let data = str_to_cstring!("write_memory_buffer", data);
+
+        let success = unsafe { lib.WriteMemoryBuffer(name.as_ptr(), data.as_ptr(), length.into()) };
+
+        Ok(success)
+    }
+
+    // TODO data is an out param, so maybe it's not necessary?
+    pub fn read_memory_buffer<T: AsRef<str>>(
+        &mut self,
+        sender_name: T,
+        data: T,
+        max_length: i32,
+    ) -> Result<(i32, String)> {
+        let lib = unsafe { library!(self.library) };
+
+        let name = str_to_cstring!("read_memory_buffer", sender_name);
+        let data = str_to_cstring!("read_memory_buffer", data);
+
+        let result = unsafe {
+            // TODO check that cast_mut() is the right method
+            lib.ReadMemoryBuffer(name.as_ptr(), data.as_ptr().cast_mut(), max_length.into())
+        };
+
+        let data = cstring_to_string!("read_memory_buffer", data);
+
+        Ok((result.0, data))
+    }
+
+    pub fn create_memory_buffer<T: AsRef<str>>(&mut self, name: T, length: i32) -> Result<bool> {
+        let lib = unsafe { library!(self.library) };
+
+        let name = str_to_cstring!("create_memory_buffer", name);
+
+        let success = unsafe { lib.CreateMemoryBuffer(name.as_ptr(), length.into()) };
+
+        Ok(success)
+    }
+
+    pub fn delete_memory_buffer(&mut self) -> Result<bool> {
+        let lib = unsafe { library!(self.library) };
+
+        Ok(lib.DeleteMemoryBuffer())
+    }
+
+    pub fn get_memory_buffer_size<T: AsRef<str>>(&mut self, name: T) -> Result<i32> {
+        let lib = unsafe { library!(self.library) };
+
+        let name = str_to_cstring!("get_memory_buffer_size", name);
+
+        let size = unsafe { lib.GetMemoryBufferSize(name.as_ptr()) };
+
+        Ok(size.0)
+    }
+
+    pub fn open_spout_console(&mut self) -> Result<()> {
+        let lib = unsafe { library!(self.library) };
+
+        lib.OpenSpoutConsole();
+
+        Ok(())
+    }
+
+    pub fn close_spout_console(&mut self, warning: bool) -> Result<()> {
+        let lib = unsafe { library!(self.library) };
+
+        lib.CloseSpoutConsole(warning);
+
+        Ok(())
+    }
+
+    pub fn enable_spout_log(&mut self) -> Result<()> {
+        let lib = unsafe { library!(self.library) };
+
+        lib.EnableSpoutLog();
+
+        Ok(())
+    }
+
+    pub fn enable_spout_log_file<T: AsRef<str>>(
+        &mut self,
+        filename: T,
+        append: bool,
+    ) -> Result<()> {
+        let lib = unsafe { library!(self.library) };
+
+        let filename = str_to_cstring!("enable_spout_log_file", filename);
+
+        unsafe {
+            lib.EnableSpoutLogFile(filename.as_ptr(), append);
+        }
+
+        Ok(())
+    }
+
+    pub fn get_spout_log(&mut self) -> Result<String> {
+        let lib = unsafe { library!(self.library) };
+
+        let log = lib.GetSpoutLog();
+
+        Ok(log.to_string())
+    }
+
+    pub fn show_spout_logs(&mut self) -> Result<()> {
+        let lib = unsafe { library!(self.library) };
+
+        lib.ShowSpoutLogs();
+
+        Ok(())
+    }
+
+    pub fn disable_spout_log(&mut self) -> Result<()> {
+        let lib = unsafe { library!(self.library) };
+
+        lib.DisableSpoutLog();
+
+        Ok(())
+    }
+
+    pub fn set_spout_log_level(&mut self, level: SpoutLibLogLevel) -> Result<()> {
+        let lib = unsafe { library!(self.library) };
+
+        lib.SetSpoutLogLevel(level);
+
+        Ok(())
+    }
+
+    pub fn spout_log<T: AsRef<str>>(&mut self, _format: T) -> Result<()> {
+        Err(Error::Unbindable)
+    }
+
+    pub fn spout_log_verbose<T: AsRef<str>>(&mut self, _format: T) -> Result<()> {
+        Err(Error::Unbindable)
+    }
+
+    pub fn spout_log_notice<T: AsRef<str>>(&mut self, _format: T) -> Result<()> {
+        Err(Error::Unbindable)
+    }
+
+    pub fn spout_log_warning<T: AsRef<str>>(&mut self, _format: T) -> Result<()> {
+        Err(Error::Unbindable)
+    }
+
+    pub fn spout_log_error<T: AsRef<str>>(&mut self, _format: T) -> Result<()> {
+        Err(Error::Unbindable)
+    }
+
+    pub fn spout_log_fatal<T: AsRef<str>>(&mut self, _format: T) -> Result<()> {
+        Err(Error::Unbindable)
+    }
+
+    /// MessageBox dialog with optional timeout.
+    ///
+    /// Used where a Windows MessageBox would interfere with the application GUI. The dialog closes iteself if a
+    /// timeout is specified.
+    ///
+    /// # Important
+    /// **How this actually works is not checkable from Rust!**
+    ///
+    /// Additionally, there is an overloaded method that is not bindable to Rust that takes more parameters.
+    ///
+    /// # Safety
+    /// Guaranteed to have a valid pointer to `SPOUTLIBRARY` as long as the backing struct exists.
+    ///
+    /// The message sent to Spout is assumed to be a valid [CString], and Spout is assumed to copy the message.
+    pub fn spout_message_box<T: AsRef<str>>(
+        &mut self,
+        message: T,
+        milliseconds: DWORD,
+    ) -> Result<i32> {
+        let lib = unsafe { library!(self.library) };
+
+        let message = str_to_cstring!("spout_message_box", message);
+
+        let result = unsafe { lib.SpoutMessageBox(message.as_ptr(), milliseconds) };
+
+        Ok(result.0)
+    }
+
+    /// Read subkey DWORD value.
+    ///
+    /// # Important
+    /// This method is not bindable to Rust.
+    ///
+    /// `key` is not actually a `DWORD`.
+    pub fn read_dword_from_registry<T: AsRef<str>>(
+        &mut self,
+        _key: DWORD,
+        _sub_key: T,
+        _value_name: T,
+        _value: DWORD,
+    ) -> Result<bool> {
+        Err(Error::Unbindable)
+    }
+
+    /// Write subkey DWORD value.
+    ///
+    /// # Important
+    /// This method is not bindable to Rust.
+    ///
+    /// `key` is not actually a `DWORD`.
+    pub fn write_dword_to_registry<T: AsRef<str>>(
+        &mut self,
+        _key: DWORD,
+        _sub_key: T,
+        _value_name: T,
+        _value: DWORD,
+    ) -> Result<bool> {
+        Err(Error::Unbindable)
+    }
+
+    /// Read subkey character string.
+    ///
+    /// # Important
+    /// This method is not bindable to Rust.
+    ///
+    /// `key` is not actually a `DWORD`.
+    pub fn read_path_from_registry<T: AsRef<str>>(
+        &mut self,
+        _key: DWORD,
+        _sub_key: T,
+        _value_name: T,
+        _file_path: T,
+    ) -> Result<bool> {
+        Err(Error::Unbindable)
+    }
+
+    /// Write subkey character string.
+    ///
+    /// # Important
+    /// This method is not bindable to Rust.
+    ///
+    /// `key` is not actually a `DWORD`.
+    pub fn write_path_to_registry<T: AsRef<str>>(
+        &mut self,
+        _key: DWORD,
+        _sub_key: T,
+        _value_name: T,
+        _file_path: T,
+    ) -> Result<bool> {
+        Err(Error::Unbindable)
+    }
+
+    /// Remove subkey value name.
+    ///
+    /// # Important
+    /// This method is not bindable to Rust.
+    ///
+    /// `key` is not actually a `DWORD`.
+    pub fn remove_path_from_registry<T: AsRef<str>>(
+        &mut self,
+        _key: DWORD,
+        _sub_key: T,
+        _value_name: T,
+    ) -> Result<bool> {
+        Err(Error::Unbindable)
+    }
+
+    /// Delete a subkey and its values.
+    ///
+    /// It must be a subkey of the key that `key` identifies, but it cannot have subkeys. Note that key names are
+    /// not case sensitive.
+    ///
+    /// # Important
+    /// This method is not bindable to Rust.
+    ///
+    /// `key` is not actually a `DWORD`.
+    pub fn remove_sub_key<T: AsRef<str>>(&mut self, _key: DWORD, _sub_key: T) -> Result<bool> {
+        Err(Error::Unbindable)
+    }
+
+    /// Find subkey.
+    ///
+    /// # Important
+    /// This method is not bindable to Rust.
+    ///
+    /// `key` is not actually a `DWORD`.
+    pub fn find_sub_key<T: AsRef<str>>(&mut self, _key: DWORD, _sub_key: T) -> Result<bool> {
+        Err(Error::Unbindable)
+    }
+
+    pub fn get_sdk_version(&mut self) -> Result<String> {
+        let lib = unsafe { library!(self.library) };
+
+        let version = lib.GetSDKversion();
+
+        Ok(version.to_string())
+    }
+
+    pub fn is_laptop(&mut self) -> Result<bool> {
+        let lib = unsafe { library!(self.library) };
+
+        Ok(lib.IsLaptop())
+    }
+
+    pub fn start_timing(&mut self) -> Result<()> {
+        let lib = unsafe { library!(self.library) };
+
+        lib.StartTiming();
+
+        Ok(())
+    }
+
+    pub fn end_timing(&mut self) -> Result<f64> {
+        let lib = unsafe { library!(self.library) };
+
+        Ok(lib.EndTiming())
+    }
+
+    pub fn is_initialized(&mut self) -> Result<bool> {
+        let lib = unsafe { library!(self.library) };
+
+        Ok(lib.IsInitialized())
+    }
+
+    pub fn bind_shared_texture(&mut self) -> Result<bool> {
+        let lib = unsafe { library!(self.library) };
+
+        Ok(lib.BindSharedTexture())
+    }
+
+    pub fn unbind_shared_texture(&mut self) -> Result<bool> {
+        let lib = unsafe { library!(self.library) };
+
+        Ok(lib.UnBindSharedTexture())
+    }
+
+    pub fn get_shared_texture_id(&mut self) -> Result<GLuint> {
+        let lib = unsafe { library!(self.library) };
+
+        Ok(lib.GetSharedTextureID())
+    }
+
+    pub fn get_sender_count(&mut self) -> Result<i32> {
+        let lib = unsafe { library!(self.library) };
+
+        Ok(lib.GetSenderCount().0)
+    }
+
+    // TODO sender_name is actually an out param, so maybe it's not needed here?
+    pub fn get_sender<T: AsRef<str>>(
+        &mut self,
+        index: i32,
+        sender_name: T,
+        max_size: i32,
+    ) -> Result<(bool, String)> {
+        let lib = unsafe { library!(self.library) };
+
+        let sender_name = str_to_cstring!("get_sender", sender_name);
+
+        let success = unsafe {
+            lib.GetSender(
+                index.into(),
+                // TODO check that cast_mut() is the correct method
+                sender_name.as_ptr().cast_mut(),
+                max_size.into(),
+            )
+        };
+
+        let sender_name = cstring_to_string!("get_sender", sender_name);
+
+        Ok((success, sender_name))
+    }
+
+    pub fn find_sender_name<T: AsRef<str>>(&mut self, sender_name: T) -> Result<bool> {
+        let lib = unsafe { library!(self.library) };
+
+        let sender_name = str_to_cstring!("find_sender_name", sender_name);
+
+        let found = unsafe { lib.FindSenderName(sender_name.as_ptr()) };
+
+        Ok(found)
+    }
+
+    pub fn get_sender_info<T: AsRef<str>>(
+        &mut self,
+        sender_name: T,
+        width: u32,
+        height: u32,
+        share_handle: HANDLE,
+        format: DWORD,
+    ) -> Result<bool> {
+        let lib = unsafe { library!(self.library) };
+
+        let sender_name = str_to_cstring!("get_sender_info", sender_name);
+
+        // TODO all these params need to be pinned
+
+        // let success = unsafe {
+        //     lib.GetSenderInfo(
+        //         sender_name.as_ptr(),
+        //         width.into(),
+        //         height.into(),
+        //         share_handle,
+        //         format,
+        //     )
+        // };
+
+        // Ok(success)
+
+        todo!()
+    }
+
+    // TODO Maybe sender name isn't necessary since sender_name is an out param?
+    pub fn get_active_sender<T: AsRef<str>>(&mut self, sender_name: T) -> Result<(bool, String)> {
+        let lib = unsafe { library!(self.library) };
+
+        let sender_name = str_to_cstring!("get_active_sender", sender_name);
+
+        // TODO check that cast_mut() is the correct call
+        let success = unsafe { lib.GetActiveSender(sender_name.as_ptr().cast_mut()) };
+
+        let sender_name = cstring_to_string!("get_active_sender", sender_name);
+
+        Ok((success, sender_name))
+    }
+
+    pub fn set_active_sender<T: AsRef<str>>(&mut self, sender_name: T) -> Result<bool> {
+        let lib = unsafe { library!(self.library) };
+
+        let sender_name = str_to_cstring!("set_active_sender", sender_name);
+
+        let success = unsafe { lib.SetActiveSender(sender_name.as_ptr()) };
+
+        Ok(success)
+    }
+
+    pub fn get_buffer_mode(&mut self) -> Result<bool> {
+        let lib = unsafe { library!(self.library) };
+
+        Ok(lib.GetBufferMode())
+    }
+
+    pub fn set_buffer_mode(&mut self, active: bool) -> Result<()> {
+        let lib = unsafe { library!(self.library) };
+
+        lib.SetBufferMode(active);
+
+        Ok(())
+    }
+
+    pub fn get_buffers(&mut self) -> Result<i32> {
+        let lib = unsafe { library!(self.library) };
+
+        Ok(lib.GetBuffers().0)
+    }
+
+    pub fn set_buffers(&mut self, buffers: i32) -> Result<()> {
+        let lib = unsafe { library!(self.library) };
+
+        lib.SetBuffers(buffers.into());
+
+        Ok(())
+    }
+
+    pub fn get_max_senders(&mut self) -> Result<i32> {
+        let lib = unsafe { library!(self.library) };
+
+        Ok(lib.GetMaxSenders().0)
+    }
+
+    pub fn set_max_senders(&mut self, max_senders: i32) -> Result<()> {
+        let lib = unsafe { library!(self.library) };
+
+        lib.SetMaxSenders(max_senders.into());
+
+        Ok(())
+    }
+
+    pub fn create_sender<T: AsRef<str>>(
+        &mut self,
+        sender_name: T,
+        width: u32,
+        height: u32,
+        format: DWORD,
+    ) -> Result<bool> {
+        let lib = unsafe { library!(self.library) };
+
+        let sender_name = str_to_cstring!("create_sender", sender_name);
+
+        let success =
+            unsafe { lib.CreateSender(sender_name.as_ptr(), width.into(), height.into(), format) };
+
+        Ok(success)
+    }
+
+    pub fn update_sender<T: AsRef<str>>(
+        &mut self,
+        sender_name: T,
+        width: u32,
+        height: u32,
+    ) -> Result<bool> {
+        let lib = unsafe { library!(self.library) };
+
+        let sender_name = str_to_cstring!("update_sender", sender_name);
+
+        let success =
+            unsafe { lib.UpdateSender(sender_name.as_ptr(), width.into(), height.into()) };
+
+        Ok(success)
+    }
+
+    /// Create receiver connection.
+    ///
+    /// # Safety
+    /// Guaranteed to have a valid pointer to `SPOUTLIBRARY` as long as the backing struct exists.
+    pub fn create_receiver<T: AsRef<str>>(
+        &mut self,
+        sender_name: T,
+        width: u32,
+        height: u32,
+        use_active: bool,
+    ) -> Result<bool> {
+        // TODO this method requires all params to be pinned
+        todo!()
+    }
+
+    /// Check receiver connection.
+    ///
+    /// # Safety
+    /// Guaranteed to have a valid pointer to `SPOUTLIBRARY` as long as the backing struct exists.
+    pub fn check_receiver<T: AsRef<str>>(
+        &mut self,
+        sender_name: T,
+        width: u32,
+        height: u32,
+        use_active: bool,
+    ) -> Result<bool> {
+        // TODO this method requires all params to be pinned
+        todo!()
+    }
+
+    pub fn get_dx9(&mut self) -> Result<bool> {
+        let lib = unsafe { library!(self.library) };
+
+        Ok(lib.GetDX9())
+    }
+
+    pub fn set_dx9(&mut self, dx9: bool) -> Result<bool> {
+        let lib = unsafe { library!(self.library) };
+
+        Ok(lib.SetDX9(dx9))
+    }
+
+    pub fn get_memory_share_mode(&mut self) -> Result<bool> {
+        let lib = unsafe { library!(self.library) };
+
+        Ok(lib.GetMemoryShareMode())
+    }
+
+    pub fn set_memory_share_mode(&mut self, mem: bool) -> Result<bool> {
+        let lib = unsafe { library!(self.library) };
+
+        Ok(lib.SetMemoryShareMode(mem))
+    }
+
+    pub fn get_cpu_mode(&mut self) -> Result<bool> {
+        let lib = unsafe { library!(self.library) };
+
+        Ok(lib.GetCPUmode())
+    }
+
+    pub fn set_cpu_mode(&mut self, cpu: bool) -> Result<bool> {
+        let lib = unsafe { library!(self.library) };
+
+        Ok(lib.SetCPUmode(cpu))
+    }
+
+    pub fn get_share_mode(&mut self) -> Result<i32> {
+        let lib = unsafe { library!(self.library) };
+
+        Ok(lib.GetShareMode().0)
+    }
+
+    pub fn set_share_mode(&mut self, mode: i32) -> Result<()> {
+        let lib = unsafe { library!(self.library) };
+
+        lib.SetShareMode(mode.into());
+
+        Ok(())
+    }
+
+    pub fn select_sender_panel(&mut self) -> Result<()> {
+        let lib = unsafe { library!(self.library) };
+
+        lib.SelectSenderPanel();
+
+        Ok(())
+    }
+
+    // TODO host_path is an out param, maybe it's not needed?
+    pub fn get_host_path<T: AsRef<str>>(
+        &mut self,
+        sender_name: T,
+        host_path: T,
+        max_chars: i32,
+    ) -> Result<(bool, String)> {
+        let lib = unsafe { library!(self.library) };
+
+        let sender_name = str_to_cstring!("get_host_path", sender_name);
+        let host_path = str_to_cstring!("get_host_path", host_path);
+
+        let success = unsafe {
+            lib.GetHostPath(
+                sender_name.as_ptr(),
+                // TODO cast_mut might not be right
+                host_path.as_ptr().cast_mut(),
+                max_chars.into(),
+            )
+        };
+
+        let host_path = cstring_to_string!("get_host_path", host_path);
+
+        Ok((success, host_path))
+    }
+
+    pub fn get_vertical_sync(&mut self) -> Result<i32> {
+        let lib = unsafe { library!(self.library) };
+
+        Ok(lib.GetVerticalSync().0)
+    }
+
+    pub fn set_vertical_sync(&mut self, sync: bool) -> Result<bool> {
+        let lib = unsafe { library!(self.library) };
+
+        Ok(lib.SetVerticalSync(sync))
+    }
+
+    pub fn get_spout_version(&mut self) -> Result<i32> {
+        let lib = unsafe { library!(self.library) };
+
+        Ok(lib.GetSpoutVersion().0)
+    }
+
+    pub fn get_auto_share(&mut self) -> Result<bool> {
+        let lib = unsafe { library!(self.library) };
+
+        Ok(lib.GetAutoShare())
+    }
+
+    pub fn set_auto_share(&mut self, auto: bool) -> Result<()> {
+        let lib = unsafe { library!(self.library) };
+
+        lib.SetAutoShare(auto);
+
+        Ok(())
+    }
+
+    pub fn is_gl_dx_ready(&mut self) -> Result<bool> {
+        let lib = unsafe { library!(self.library) };
+
+        Ok(lib.IsGLDXready())
     }
 }
 
