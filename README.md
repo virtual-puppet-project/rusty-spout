@@ -2,7 +2,7 @@
 
 [Spout](https://spout.zeal.co/) bindings to Rust. Initially created for usage with [Godot](https://github.com/godotengine/godot) and [gdext](https://github.com/godot-rust/gdext).
 
-Uses a [fork of Spout2](https://github.com/virtual-puppet-project/Spout2-lean.git) with all the precompiled `dll`s and `lib`s removed.
+Uses a [fork of Spout2](https://github.com/virtual-puppet-project/Spout2-lean.git) with all the precompiled `dll`s, `lib`s, and `exe`s removed.
 
 A Godot GDExtension-compatible library can be built with the `godot` feature enabled.
 
