@@ -1,0 +1,32 @@
+[package]
+name = "rusty-spout"
+description = "Spout bindings to Rust."
+version = "0.1.0-alpha.1"
+edition = "2021"
+authors = ["Timothy Yuen<timothy.yuen22@gmail.com"]
+license = "MPL-2.0"
+readme = "README.md"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+crate-type = ["cdylib", "lib"]
+
+[[bin]]
+path = "src/main.rs"
+name = "tester"
+
+[features]
+default = []
+godot = ["dep:godot"]
+
+[dependencies]
+autocxx = "0.26"
+# WHYYYYY https://github.com/google/autocxx/issues/739
+cxx = "1.0"
+godot = { git = "https://github.com/godot-rust/gdext.git", rev = "b4e6fd6c9c23e0fd3a124c2893a9592c861ab780", optional = true }
+thiserror = "1.0"
+
+[build-dependencies]
+autocxx-build = "0.26"
+cmake = "0.1"

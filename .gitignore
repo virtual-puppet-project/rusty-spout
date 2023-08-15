@@ -1,0 +1,9 @@
+/target
+Cargo.lock
+
+.vscode
+
+# Build.rs output for copying dlls
+# Needed since Rust locks files during the build step
+_spout_dll_path
+rusty-spout
