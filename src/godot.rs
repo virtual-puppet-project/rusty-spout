@@ -54,6 +54,42 @@ impl SpoutGd {
             }
         }
     }
+
+    #[func]
+    fn set_receiver_name(&mut self, sender_name: GodotString) -> Error {
+        match self.library.set_receiver_name(sender_name.to_string()) {
+            Ok(_) => Error::OK,
+            Err(e) => {
+                godot_error!("{e}");
+                Error::ERR_CANT_CONNECT
+            }
+        }
+    }
+
+    #[func]
+    fn read_memory_buffer(&mut self, buffer_name: GodotString, max_length: u32) -> Variant {
+        let max_length = match usize::try_from(max_length) {
+            Ok(v) => v,
+            Err(e) => {
+                godot_error!("{e}");
+                return Error::ERR_INVALID_PARAMETER.to_variant();
+            }
+        };
+
+        match self
+            .library
+            .read_memory_buffer(buffer_name.to_string(), max_length)
+        {
+            Ok((_bytes_read, data)) => {
+                godot_print!("{data}");
+                GodotString::from(data).to_variant()
+            }
+            Err(e) => {
+                godot_error!("{e}");
+                Error::ERR_INVALID_DATA.to_variant()
+            }
+        }
+    }
 }
 
 impl SpoutGd {

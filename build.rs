@@ -38,7 +38,13 @@ fn main() {
 }
 
 fn ensure_spout_initted() {
+    // TODO this might not be the correct path
     if !Path::new(SPOUT_DIR).exists() {
+        // TODO explode
+        // if env!("CARGO_NET_OFFLINE ") {
+        //     panic!("")
+        // }
+
         let status = std::process::Command::new("git")
             .args(["submodule", "update", "--init", SPOUT_TAG])
             .status()
