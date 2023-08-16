@@ -12,10 +12,6 @@ readme = "README.md"
 [lib]
 crate-type = ["cdylib", "lib"]
 
-[[bin]]
-path = "src/main.rs"
-name = "tester"
-
 [features]
 default = []
 godot = ["dep:godot"]

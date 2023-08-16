@@ -44,12 +44,72 @@ pub enum Error {
     NullPtr,
     #[error("Spout function not bindable to Rust")]
     Unbindable,
+    #[error("Unexpected value: {context:?}")]
+    UnexpectedValue { context: String },
 }
 
 #[derive(Debug)]
 pub enum FfiType {
     CString,
     CStr,
+    CInt,
+}
+
+#[derive(Debug)]
+pub enum DxgiGpuPreference {
+    NotRegistered,
+    Unspecified,
+    MinimumPower,
+    HighPerformance,
+}
+
+impl TryInto<String> for DxgiGpuPreference {
+    type Error = Error;
+
+    fn try_into(self) -> std::result::Result<String, Self::Error> {
+        match self {
+            DxgiGpuPreference::Unspecified => Ok("DXGI_GPU_PREFERENCE_UNSPECIFIED".to_string()),
+            DxgiGpuPreference::MinimumPower => Ok("DXGI_GPU_PREFERENCE_MINIMUM_POWER".to_string()),
+            DxgiGpuPreference::HighPerformance => {
+                Ok("DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE".to_string())
+            }
+            _ => Err(Error::UnexpectedValue {
+                context: "DxgiGpuPreference::try_into".to_string(),
+            }),
+        }
+    }
+}
+
+impl TryInto<i32> for DxgiGpuPreference {
+    type Error = Error;
+
+    fn try_into(self) -> std::result::Result<i32, Self::Error> {
+        match self {
+            DxgiGpuPreference::NotRegistered => Ok(-1),
+            DxgiGpuPreference::Unspecified => Ok(0),
+            DxgiGpuPreference::MinimumPower => Ok(1),
+            DxgiGpuPreference::HighPerformance => Ok(2),
+            _ => Err(Error::UnexpectedValue {
+                context: "DxgiGpuPreference::try_into".to_string(),
+            }),
+        }
+    }
+}
+
+impl TryFrom<i32> for DxgiGpuPreference {
+    type Error = Error;
+
+    fn try_from(value: i32) -> std::result::Result<Self, Self::Error> {
+        match value {
+            -1 => Ok(Self::NotRegistered),
+            0 => Ok(Self::Unspecified),
+            1 => Ok(Self::MinimumPower),
+            2 => Ok(Self::HighPerformance),
+            _ => Err(Error::UnexpectedValue {
+                context: "DxgiGpuPreference::try_from".to_string(),
+            }),
+        }
+    }
 }
 
 type Result<T> = std::result::Result<T, Error>;
@@ -87,6 +147,8 @@ macro_rules! library {
     }};
 }
 
+// TODO use file!() and line!() instead of passing fn_name
+/// Conversion helper for creating [CString]s from anything that implements [AsRef]<[str]>.
 macro_rules! str_to_cstring {
     ($fn_name:expr, $str:expr) => {{
         match CString::new($str.as_ref()) {
@@ -101,11 +163,47 @@ macro_rules! str_to_cstring {
     }};
 }
 
+// TODO use file!() and line!() instead of passing fn_name
+/// Conversion helper for creating [String]s from [CString]s.
 macro_rules! cstring_to_string {
     ($fn_name:expr, $c_string:expr) => {{
         match $c_string.to_str() {
             Ok(v) => v.to_string(),
-            Err(e) => format!("{}: {e}", $fn_name),
+            Err(e) => {
+                return Err(Error::FfiTypeFrom {
+                    ffi_type: FfiType::CString,
+                    context: format!("{}: {e}", $fn_name),
+                })
+            }
+        }
+    }};
+}
+
+/// Conversion helper for creating a [CStr] from a buffer.
+macro_rules! buf_to_cstr {
+    ($buf:expr) => {{
+        match CStr::from_bytes_with_nul($buf.as_slice()) {
+            Ok(v) => v,
+            Err(e) => {
+                return Err(Error::FfiTypeInto {
+                    ffi_type: FfiType::CStr,
+                    context: format!("{} - {}: {e}", file!(), line!()),
+                })
+            }
+        }
+    }};
+}
+
+macro_rules! usize_to_c_int {
+    ($usize:expr) => {{
+        match i32::try_from($usize) {
+            Ok(v) => v,
+            Err(e) => {
+                return Err(Error::FfiTypeInto {
+                    ffi_type: FfiType::CInt,
+                    context: format!("read_memory_buffer: {e}"),
+                })
+            }
         }
     }};
 }
@@ -211,13 +309,13 @@ impl RustySpout {
     pub fn send_fbo(
         &mut self,
         fbo_id: GLuint,
-        width: c_uint,
-        height: c_uint,
+        width: u32,
+        height: u32,
         invert: bool,
     ) -> Result<bool> {
         let lib = unsafe { library!(self.library) };
 
-        Ok(lib.SendFbo(fbo_id, width, height, invert))
+        Ok(lib.SendFbo(fbo_id, width.into(), height.into(), invert))
     }
 
     /// Send an OpenGL texture.
@@ -230,14 +328,21 @@ impl RustySpout {
         &mut self,
         texture_id: GLuint,
         texture_target: GLuint,
-        width: c_uint,
-        height: c_uint,
+        width: u32,
+        height: u32,
         invert: bool,
         host_fbo: GLuint,
     ) -> Result<bool> {
         let lib = unsafe { library!(self.library) };
 
-        Ok(lib.SendTexture(texture_id, texture_target, width, height, invert, host_fbo))
+        Ok(lib.SendTexture(
+            texture_id,
+            texture_target,
+            width.into(),
+            height.into(),
+            invert,
+            host_fbo,
+        ))
     }
 
     /// Send image pixels. NOTE: this is very slow.
@@ -249,14 +354,15 @@ impl RustySpout {
     pub fn send_image(
         &mut self,
         pixels: *const u8,
-        width: c_uint,
-        height: c_uint,
+        width: u32,
+        height: u32,
         gl_format: GLenum,
         invert: bool,
     ) -> Result<bool> {
         let lib = unsafe { library!(self.library) };
 
-        let success = unsafe { lib.SendImage(pixels, width, height, gl_format, invert) };
+        let success =
+            unsafe { lib.SendImage(pixels, width.into(), height.into(), gl_format, invert) };
 
         Ok(success)
     }
@@ -635,12 +741,20 @@ impl RustySpout {
         Ok(())
     }
 
+    /// Return frame count status.
+    ///
+    /// # Safety
+    /// Guaranteed to have a valid pointer to `SPOUTLIBRARY` as long as the backing struct exists.
     pub fn is_frame_count_enabled(&mut self) -> Result<bool> {
         let lib = unsafe { library!(self.library) };
 
         Ok(lib.IsFrameCountEnabled())
     }
 
+    /// Sender frame rate control.
+    ///
+    /// # Safety
+    /// Guaranteed to have a valid pointer to `SPOUTLIBRARY` as long as the backing struct exists.
     pub fn hold_fps(&mut self, fps: i32) -> Result<()> {
         let lib = unsafe { library!(self.library) };
 
@@ -649,12 +763,22 @@ impl RustySpout {
         Ok(())
     }
 
+    /// Get the system refresh rate.
+    ///
+    /// # Safety
+    /// Guaranteed to have a valid pointer to `SPOUTLIBRARY` as long as the backing struct exists.
     pub fn get_refresh_rate(&mut self) -> Result<f64> {
         let lib = unsafe { library!(self.library) };
 
         Ok(lib.GetRefreshRate())
     }
 
+    /// Signal sync event.
+    ///
+    /// # Safety
+    /// Guaranteed to have a valid pointer to `SPOUTLIBRARY` as long as the backing struct exists.
+    ///
+    /// The [CString] should be copied on the Spout side and is safe to drop.
     pub fn set_frame_sync<T: AsRef<str>>(&mut self, sender_name: T) -> Result<()> {
         let lib = unsafe { library!(self.library) };
 
@@ -675,6 +799,12 @@ impl RustySpout {
         Ok(())
     }
 
+    /// Wait or test for a sync event.
+    ///
+    /// # Safety
+    /// Guaranteed to have a valid pointer to `SPOUTLIBRARY` as long as the backing struct exists.
+    ///
+    /// The [CString] should be copied on the Spout side and should be safe to drop.
     pub fn wait_frame_sync<T: AsRef<str>>(
         &mut self,
         sender_name: T,
@@ -697,36 +827,63 @@ impl RustySpout {
         Ok(success)
     }
 
-    pub fn write_memory_buffer<T: AsRef<str>>(
-        &mut self,
-        sender_name: T,
-        data: T,
-        length: i32,
-    ) -> Result<bool> {
+    /// Write data.
+    ///
+    /// # Safety
+    /// Guaranteed to have a valid pointer to `SPOUTLIBRARY` as long as the backing struct exists.
+    ///
+    /// The sender name and data should be copied on the Spout side and should be safe to drop.
+    pub fn write_memory_buffer<T: AsRef<str>>(&mut self, sender_name: T, data: T) -> Result<bool> {
         let lib = unsafe { library!(self.library) };
 
         let name = str_to_cstring!("write_memory_buffer", sender_name);
         let data = str_to_cstring!("write_memory_buffer", data);
+        let length = data.as_c_str().to_bytes_with_nul().len();
 
-        let success = unsafe { lib.WriteMemoryBuffer(name.as_ptr(), data.as_ptr(), length.into()) };
+        let success =
+            unsafe { lib.WriteMemoryBuffer(name.as_ptr(), data.as_ptr(), (length as i32).into()) };
 
         Ok(success)
     }
 
-    // TODO data is an out param, so maybe it's not necessary?
+    /// Read data.
+    ///
+    /// # Safety
+    /// Guaranteed to have a valid pointer to `SPOUTLIBRARY` as long as the backing struct exists.
+    ///
+    /// No safety guarantees are made about the data returned from the memory buffer.
     pub fn read_memory_buffer<T: AsRef<str>>(
         &mut self,
         sender_name: T,
-        data: T,
-        max_length: i32,
+        max_length: usize,
     ) -> Result<(i32, String)> {
         let lib = unsafe { library!(self.library) };
 
         let name = str_to_cstring!("read_memory_buffer", sender_name);
-        let data = str_to_cstring!("read_memory_buffer", data);
+
+        let mut buffer = vec![1; max_length - 1];
+        buffer.push(0);
+        let data = match CStr::from_bytes_with_nul(buffer.as_slice()) {
+            Ok(v) => v,
+            Err(e) => {
+                return Err(Error::FfiTypeInto {
+                    ffi_type: FfiType::CStr,
+                    context: format!("read_memory_buffer: {e}"),
+                })
+            }
+        };
+
+        let max_length: i32 = match max_length.try_into() {
+            Ok(v) => v,
+            Err(e) => {
+                return Err(Error::FfiTypeInto {
+                    ffi_type: FfiType::CInt,
+                    context: format!("read_memory_buffer: {e}"),
+                })
+            }
+        };
 
         let result = unsafe {
-            // TODO check that cast_mut() is the right method
             lib.ReadMemoryBuffer(name.as_ptr(), data.as_ptr().cast_mut(), max_length.into())
         };
 
@@ -735,6 +892,10 @@ impl RustySpout {
         Ok((result.0, data))
     }
 
+    /// Create a shared memory buffer.
+    ///
+    /// # Safety
+    /// Guaranteed to have a valid pointer to `SPOUTLIBRARY` as long as the backing struct exists.
     pub fn create_memory_buffer<T: AsRef<str>>(&mut self, name: T, length: i32) -> Result<bool> {
         let lib = unsafe { library!(self.library) };
 
@@ -745,12 +906,22 @@ impl RustySpout {
         Ok(success)
     }
 
+    /// Delete a shared memory buffer.
+    ///
+    /// # Safety
+    /// Guaranteed to have a valid pointer to `SPOUTLIBRARY` as long as the backing struct exists.
     pub fn delete_memory_buffer(&mut self) -> Result<bool> {
         let lib = unsafe { library!(self.library) };
 
         Ok(lib.DeleteMemoryBuffer())
     }
 
+    /// Get the number of bytes available for data transfer.
+    ///
+    /// # Safety
+    /// Guaranteed to have a valid pointer to `SPOUTLIBRARY` as long as the backing struct exists.
+    ///
+    /// The name should be copied by Spout and should be safe to drop.
     pub fn get_memory_buffer_size<T: AsRef<str>>(&mut self, name: T) -> Result<i32> {
         let lib = unsafe { library!(self.library) };
 
@@ -761,6 +932,10 @@ impl RustySpout {
         Ok(size.0)
     }
 
+    /// Open console for debugging.
+    ///
+    /// # Safety
+    /// Guaranteed to have a valid pointer to `SPOUTLIBRARY` as long as the backing struct exists.
     pub fn open_spout_console(&mut self) -> Result<()> {
         let lib = unsafe { library!(self.library) };
 
@@ -1045,21 +1220,22 @@ impl RustySpout {
         Ok(lib.GetSenderCount().0)
     }
 
-    // TODO sender_name is actually an out param, so maybe it's not needed here?
     pub fn get_sender<T: AsRef<str>>(
         &mut self,
         index: i32,
-        sender_name: T,
-        max_size: i32,
+        max_size: usize,
     ) -> Result<(bool, String)> {
         let lib = unsafe { library!(self.library) };
 
-        let sender_name = str_to_cstring!("get_sender", sender_name);
+        let mut buffer = vec![1; max_size - 1];
+        buffer.push(0);
+        let sender_name = buf_to_cstr!(buffer);
+
+        let max_size = usize_to_c_int!(max_size);
 
         let success = unsafe {
             lib.GetSender(
                 index.into(),
-                // TODO check that cast_mut() is the correct method
                 sender_name.as_ptr().cast_mut(),
                 max_size.into(),
             )
@@ -1109,13 +1285,13 @@ impl RustySpout {
         todo!()
     }
 
-    // TODO Maybe sender name isn't necessary since sender_name is an out param?
-    pub fn get_active_sender<T: AsRef<str>>(&mut self, sender_name: T) -> Result<(bool, String)> {
+    pub fn get_active_sender<T: AsRef<str>>(&mut self) -> Result<(bool, String)> {
         let lib = unsafe { library!(self.library) };
 
-        let sender_name = str_to_cstring!("get_active_sender", sender_name);
+        let mut buffer = vec![];
+        buffer.push(0);
+        let sender_name = buf_to_cstr!(buffer);
 
-        // TODO check that cast_mut() is the correct call
         let success = unsafe { lib.GetActiveSender(sender_name.as_ptr().cast_mut()) };
 
         let sender_name = cstring_to_string!("get_active_sender", sender_name);
@@ -1358,6 +1534,234 @@ impl RustySpout {
         let lib = unsafe { library!(self.library) };
 
         Ok(lib.IsGLDXready())
+    }
+
+    pub fn get_num_adapters(&mut self) -> Result<i32> {
+        let lib = unsafe { library!(self.library) };
+
+        Ok(lib.GetNumAdapters().0)
+    }
+
+    pub fn get_adapter_name<T: AsRef<str>>(
+        &mut self,
+        index: i32,
+        max_chars: usize,
+    ) -> Result<(bool, String)> {
+        let lib = unsafe { library!(self.library) };
+
+        let mut buffer = vec![1; max_chars - 1];
+        buffer.push(0);
+        let adapter_name = buf_to_cstr!(buffer);
+
+        let max_chars = usize_to_c_int!(max_chars);
+
+        let success = unsafe {
+            lib.GetAdapterName(
+                index.into(),
+                adapter_name.as_ptr().cast_mut(),
+                max_chars.into(),
+            )
+        };
+
+        let adapter_name = cstring_to_string!("get_adapter_name", adapter_name);
+
+        Ok((success, adapter_name))
+    }
+
+    pub fn get_adapter(&mut self) -> Result<i32> {
+        let lib = unsafe { library!(self.library) };
+
+        Ok(lib.GetAdapter().0)
+    }
+
+    pub fn get_performance_preference<T: AsRef<str>>(
+        &mut self,
+        path: T,
+    ) -> Result<DxgiGpuPreference> {
+        let lib = unsafe { library!(self.library) };
+
+        let path = str_to_cstring!("get_performance_preference", path);
+
+        let val = unsafe { lib.GetPerformancePreference(path.as_ptr()) };
+
+        DxgiGpuPreference::try_from(val.0)
+    }
+
+    pub fn set_performance_preference<T: AsRef<str>>(
+        &mut self,
+        preference: DxgiGpuPreference,
+        path: T,
+    ) -> Result<bool> {
+        let lib = unsafe { library!(self.library) };
+
+        let preference = match TryInto::<i32>::try_into(preference) {
+            Ok(v) => v.into(),
+            // TODO rust analyzer doesn't like use e @ Err(_) for some reason
+            Err(e) => return Err(e),
+        };
+        let path = str_to_cstring!("set_performance_preference", path);
+
+        let success = unsafe { lib.SetPerformancePreference(preference, path.as_ptr()) };
+
+        Ok(success)
+    }
+
+    pub fn get_preferred_adapter_name<T: AsRef<str>>(
+        &mut self,
+        preference: DxgiGpuPreference,
+        max_chars: usize,
+    ) -> Result<(bool, String)> {
+        let lib = unsafe { library!(self.library) };
+
+        let preference = match TryInto::<i32>::try_into(preference) {
+            Ok(v) => v.into(),
+            // TODO rust analyzer doesn't like use e @ Err(_) for some reason
+            Err(e) => return Err(e),
+        };
+
+        let mut buffer = vec![1; max_chars - 1];
+        buffer.push(0);
+        let adapter_name = buf_to_cstr!(buffer);
+
+        let max_chars = usize_to_c_int!(max_chars);
+
+        let success = unsafe {
+            lib.GetPreferredAdapterName(
+                preference,
+                adapter_name.as_ptr().cast_mut(),
+                max_chars.into(),
+            )
+        };
+
+        let adapter_name = cstring_to_string!("get_preferred_adapter_name", adapter_name);
+
+        Ok((success, adapter_name))
+    }
+
+    pub fn set_preferred_adapter(&mut self, preference: DxgiGpuPreference) -> Result<bool> {
+        let lib = unsafe { library!(self.library) };
+
+        let preference = match TryInto::<i32>::try_into(preference) {
+            Ok(v) => v.into(),
+            // TODO rust analyzer doesn't like use e @ Err(_) for some reason
+            Err(e) => return Err(e),
+        };
+
+        Ok(lib.SetPreferredAdapter(preference))
+    }
+
+    pub fn is_preference_available(&mut self) -> Result<bool> {
+        let lib = unsafe { library!(self.library) };
+
+        Ok(lib.IsPreferenceAvailable())
+    }
+
+    pub fn is_application_path<T: AsRef<str>>(&mut self, path: T) -> Result<bool> {
+        let lib = unsafe { library!(self.library) };
+
+        let path = str_to_cstring!("is_application_path", path);
+
+        let success = unsafe { lib.IsApplicationPath(path.as_ptr()) };
+
+        Ok(success)
+    }
+
+    pub fn create_opengl(&mut self) -> Result<bool> {
+        let lib = unsafe { library!(self.library) };
+
+        Ok(lib.CreateOpenGL())
+    }
+
+    pub fn close_opengl(&mut self) -> Result<bool> {
+        let lib = unsafe { library!(self.library) };
+
+        Ok(lib.CloseOpenGL())
+    }
+
+    pub fn copy_texture(
+        &mut self,
+        source_id: GLuint,
+        source_target: GLuint,
+        dest_id: GLuint,
+        dest_target: GLuint,
+        width: u32,
+        height: u32,
+        invert: bool,
+        host_fbo: GLuint,
+    ) -> Result<bool> {
+        let lib = unsafe { library!(self.library) };
+
+        Ok(lib.CopyTexture(
+            source_id,
+            source_target,
+            dest_id,
+            dest_target,
+            width.into(),
+            height.into(),
+            invert,
+            host_fbo,
+        ))
+    }
+
+    pub fn open_directx(&mut self) -> Result<bool> {
+        let lib = unsafe { library!(self.library) };
+
+        Ok(lib.OpenDirectX())
+    }
+
+    pub fn close_directx(&mut self) -> Result<()> {
+        let lib = unsafe { library!(self.library) };
+
+        lib.CloseDirectX();
+
+        Ok(())
+    }
+
+    pub fn open_directx11(&mut self, device: *mut c_void) -> Result<bool> {
+        let lib = unsafe { library!(self.library) };
+
+        let success = unsafe { lib.OpenDirectX11(device) };
+
+        Ok(success)
+    }
+
+    pub fn close_directx11(&mut self) -> Result<()> {
+        let lib = unsafe { library!(self.library) };
+
+        lib.CloseDirectX11();
+
+        Ok(())
+    }
+
+    pub fn get_dx11_device(&mut self) -> Result<*mut c_void> {
+        let lib = unsafe { library!(self.library) };
+
+        let ptr = lib.GetDX11Device();
+        if ptr.is_null() {
+            return Err(Error::NullPtr);
+        }
+
+        Ok(ptr)
+    }
+
+    pub fn get_dx11_context(&mut self) -> Result<*mut c_void> {
+        let lib = unsafe { library!(self.library) };
+
+        let ptr = lib.GetDX11Context();
+        if ptr.is_null() {
+            return Err(Error::NullPtr);
+        }
+
+        Ok(ptr)
+    }
+
+    pub fn release(&mut self) -> Result<()> {
+        let lib = unsafe { library!(self.library) };
+
+        lib.Release();
+        self.library = None;
+
+        Ok(())
     }
 }
 
